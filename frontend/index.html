@@ -1,0 +1,103 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <title>TEEP RAG Chatbot</title>
+  <link rel="stylesheet" href="styles.css" />
+</head>
+<body>
+  <!-- A header or background branding -->
+  <div class="app-header">
+    <h1>TEEP RAG CHATBOT</h1>
+  </div>
+
+  <!-- Main chat container -->
+  <div class="chat-container" id="chat-container">
+    <!-- Messages will be appended here dynamically -->
+  </div>
+
+  <!-- Input area for user -->
+  <div class="input-container">
+    <textarea id="user-input" rows="3" placeholder="Ask something about TEEP..." autofocus></textarea>
+    <button id="send-btn">Send</button>
+  </div>
+
+  <script>
+    const chatContainer = document.getElementById("chat-container");
+    const userInput = document.getElementById("user-input");
+    const sendBtn = document.getElementById("send-btn");
+
+    // Replace with your FastAPI endpoint if different
+    const API_ENDPOINT = "http://localhost:8000/api/chat";
+
+    // Keeps track of all chat messages in the conversation
+    const conversation = [];
+
+    // Render the conversation in the chatContainer
+    function renderConversation() {
+      chatContainer.innerHTML = ""; // Clear old messages
+
+      conversation.forEach(msg => {
+        // Create a wrapper div for each message
+        const messageDiv = document.createElement("div");
+        messageDiv.classList.add("message", msg.role);
+
+        // Insert the text
+        messageDiv.textContent = msg.text;
+
+        // Append to chat container
+        chatContainer.appendChild(messageDiv);
+      });
+
+      // Scroll to bottom
+      chatContainer.scrollTop = chatContainer.scrollHeight;
+    }
+
+    // Handle sending user query
+    function handleSend() {
+      const query = userInput.value.trim();
+      if (!query) return; // don't send empty queries
+
+      // Add user message to conversation
+      conversation.push({ role: "user", text: query });
+      renderConversation();
+
+      // Clear the textarea
+      userInput.value = "";
+
+      // Make the request to FastAPI
+      // We'll pass the user query as a query parameter (like /api/chat?user_query=xxx)
+      fetch(`${API_ENDPOINT}?user_query=${encodeURIComponent(query)}`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: "" // empty body, or you could pass JSON if your endpoint requires
+      })
+        .then(response => response.json())
+        .then(data => {
+          // The "answer" field from your /chat endpoint
+          const botAnswer = data.answer || "[No answer returned]";
+
+          // Add bot response to conversation
+          conversation.push({ role: "bot", text: botAnswer });
+          renderConversation();
+        })
+        .catch(err => {
+          console.error("Error calling chatbot API:", err);
+          conversation.push({ role: "bot", text: "Error: Could not reach the chatbot server." });
+          renderConversation();
+        });
+    }
+
+    // Send on button click
+    sendBtn.addEventListener("click", handleSend);
+
+    // Also send on Enter key (shift+enter for new line)
+    userInput.addEventListener("keydown", (e) => {
+      if (e.key === "Enter" && !e.shiftKey) {
+        e.preventDefault(); // Avoid creating a new line
+        handleSend();
+      }
+    });
+  </script>
+</body>
+</html>
