@@ -21,6 +21,13 @@ app = FastAPI(
     version="0.1.0"
 )
 
+
+from fastapi.middleware.cors import CORSMiddleware
+
+origins = [
+    "https://teep.africa",  # Your website domain
+]
+
 # Enable CORS
 app.add_middleware(
     CORSMiddleware,

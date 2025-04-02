@@ -45,3 +45,4 @@ def chat(
         "relevant_docs": docs,
         "answer": final_answer
     }
+
