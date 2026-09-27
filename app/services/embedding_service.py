@@ -22,6 +22,25 @@ def generate_embedding(text: str) -> List[float]:
     return response["data"][0]["embedding"]
 
 
+def generate_embeddings(texts: Sequence[str]) -> List[List[float]]:
+    """
+    Embed a batch of texts in one request, in the order they were given.
+
+    Seeding calls this instead of looping over generate_embedding: the whole
+    knowledge base costs one round trip rather than one per chunk. The API may
+    return the objects out of order, hence the sort on "index".
+    """
+    if not texts:
+        return []
+
+    response = openai.Embedding.create(
+        model=EMBEDDING_MODEL,
+        input=list(texts)
+    )
+    ordered = sorted(response["data"], key=lambda item: item["index"])
+    return [item["embedding"] for item in ordered]
+
+
 def to_vector_literal(embedding: Sequence[float]) -> str:
     """
     Format an embedding as a pgvector literal, e.g. '[0.1,0.2,0.3]'.
