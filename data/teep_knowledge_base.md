@@ -21,7 +21,7 @@ TEEP envisions a future where financial transactions are not a source of stress 
 - Build a global network where users can pay bills across countries with zero delays and minimal fees. Our goal is to make international financial transactions feel as easy as local ones.
 
 ## TEEP Features
-- TV/Cable: Pay for all your TV and cable subscriptions effortlessly, on time.
+- TV/Cable: Pay for your TV and cable subscriptions effortlessly, on time. Supported providers include DsTV and GoTV.
 - Education: Conveniently pay for JAMB, and settle selected school fees for major educational institutions, hassle-free.
 - Tickets: Secure cheap flight tickets for travels within Nigeria and international destinations.
 - Betting: We accept online bets through our partners to help you easily place your bets and win.
