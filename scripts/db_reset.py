@@ -1,6 +1,7 @@
 # scripts/db_reset.py
 from sqlalchemy import create_engine, text
 from app.config import settings
+from app.rate_limit import ensure_schema
 from app.services.embedding_service import EMBEDDING_DIM
 
 # HNSW indexing landed in pgvector 0.5.0. Older servers still run correctly,
@@ -30,11 +31,13 @@ def reset_db():
         version = _pgvector_version(conn)
         print(f"pgvector extension enabled (version {'.'.join(map(str, version))})")
 
-        # Drop existing tables
+        # Drop existing tables. rate_limit_hits holds nothing worth keeping -
+        # the counters refill within an hour of traffic.
         drop_sql = text("""
             DROP TABLE IF EXISTS chat;
             DROP TABLE IF EXISTS chats;
             DROP TABLE IF EXISTS documents;
+            DROP TABLE IF EXISTS rate_limit_hits;
         """)
         conn.execute(drop_sql)
 
@@ -58,6 +61,12 @@ def reset_db():
         conn.execute(create_sql)
         conn.commit()
         print(f"Tables created: chats, documents (embedding vector({EMBEDDING_DIM}))")
+
+        # Shared counters for the per-IP rate limiter. The app creates this on
+        # startup too, so a deploy never needs a migration; it is repeated here
+        # so a reset leaves a complete schema behind.
+        ensure_schema(engine)
+        print("Table created: rate_limit_hits (per-IP rate limiter)")
 
         # vector_cosine_ops matches the <=> operator used by the retrieval query.
         # An HNSW index builds fine on an empty table, unlike ivfflat, which needs

@@ -6,26 +6,55 @@ The widget on teep.africa makes POST /api/chat reachable by anyone, and every
 allowed call spends an embedding plus a completion. This caps what a single
 caller can spend without needing an account system.
 
+Counters live in Postgres, not in the process. An in-process limiter was tried
+first and measurably did not hold: Railway runs more than one replica, the load
+balancer round-robins between them, and each kept its own tally - 24 requests
+against a 6/minute limit let 13 through, with allowed and rejected calls
+interleaved by which replica happened to answer. Shared state is what makes the
+configured number the real number.
+
 Sliding window rather than fixed buckets: a fixed window lets someone send a
 full allowance at 11:59:59 and another at 12:00:00, so the real burst is twice
-the limit. The cost is keeping timestamps per caller, which is fine at support
-volumes - see _sweep for how that is kept from growing without bound.
-
-State lives in this process. Railway runs one replica by default, so that is
-the whole service; if you scale to several, each gets its own allowance and the
-effective limit multiplies by the replica count. Move to Redis or a Postgres
-table at that point.
+the limit.
 """
 
 import logging
 import threading
 import time
-from collections import deque
-from typing import Deque, Dict, List, Optional, Tuple
+from typing import List, Optional, Tuple
 
 from fastapi import HTTPException, Request
+from sqlalchemy import text
+from sqlalchemy.exc import SQLAlchemyError
+from sqlalchemy.orm import Session
 
 logger = logging.getLogger(__name__)
+
+# Hits are pruned to the longest window, so this table stays small: a few rows
+# per active caller per hour. bucket_key is the caller identity, not a user id.
+_SCHEMA_SQL = """
+CREATE TABLE IF NOT EXISTS rate_limit_hits (
+    id BIGSERIAL PRIMARY KEY,
+    bucket_key TEXT NOT NULL,
+    hit_at TIMESTAMPTZ NOT NULL DEFAULT now()
+);
+CREATE INDEX IF NOT EXISTS rate_limit_hits_key_time_idx
+    ON rate_limit_hits (bucket_key, hit_at DESC);
+CREATE INDEX IF NOT EXISTS rate_limit_hits_time_idx
+    ON rate_limit_hits (hit_at);
+"""
+
+
+def ensure_schema(engine) -> None:
+    """
+    Create the counter table if it is missing.
+
+    Called at startup so a deploy needs no migration step; scripts/db_reset.py
+    creates the same table for a fresh database.
+    """
+    with engine.connect() as conn:
+        conn.execute(text(_SCHEMA_SQL))
+        conn.commit()
 
 
 def resolve_client_ip(request: Request, trusted_hops: int = 1) -> str:
@@ -55,7 +84,7 @@ def resolve_client_ip(request: Request, trusted_hops: int = 1) -> str:
     return client.host if client else "unknown"
 
 
-class SlidingWindowRateLimiter:
+class PostgresRateLimiter:
     """
     Enforces several windows at once, e.g. 6/minute and 40/hour.
 
@@ -64,39 +93,92 @@ class SlidingWindowRateLimiter:
     up the OpenAI bill overnight.
     """
 
-    def __init__(self, limits: List[Tuple[int, int]], sweep_every: int = 300):
-        # limits: (max_requests, window_seconds), stored longest window first so
-        # _sweep can use limits[0] as the retention horizon.
+    def __init__(self, limits: List[Tuple[int, int]], cleanup_every: int = 300):
+        # limits: (max_requests, window_seconds), longest window first so
+        # limits[0] gives the retention horizon.
         #
         # A non-positive allowance means "window off", so it is dropped here.
-        # Kept as a filter rather than a guard in hit(): `count >= 0` is true on
-        # the very first request, so leaving a zero in the list would reject
-        # every call instead of disabling the window.
+        # Kept as a filter rather than a guard further down: `count >= 0` is
+        # true on the very first request, so leaving a zero in the list would
+        # reject every call instead of disabling the window.
         usable = [(n, w) for n, w in limits if n > 0 and w > 0]
         self._limits = sorted(usable, key=lambda lim: lim[1], reverse=True)
         self._horizon = self._limits[0][1] if self._limits else 0
-        self._hits: Dict[str, Deque[float]] = {}
-        self._lock = threading.Lock()
-        self._sweep_every = sweep_every
-        self._last_sweep = time.monotonic()
+        self._sql = text(self._build_sql()) if self._limits else None
 
-    def _sweep(self, now: float) -> None:
+        self._cleanup_every = cleanup_every
+        self._cleanup_lock = threading.Lock()
+        self._last_cleanup = 0.0
+
+    def _build_sql(self) -> str:
         """
-        Drop callers that have gone quiet.
+        One statement that counts, decides and records.
 
-        Without this the dict keeps one entry per address ever seen, which a
-        stream of forged X-Forwarded-For values could grow until the process
-        runs out of memory - turning a rate limiter into a way to take the
-        service down. Called under the lock.
+        Doing it in a single statement means every window is evaluated against
+        the same snapshot, and the insert cannot land between the count and the
+        decision. A data-modifying CTE always runs to completion in Postgres
+        even when the outer query never selects from it, which is what lets the
+        insert be conditional on `ok`.
         """
-        if now - self._last_sweep < self._sweep_every:
-            return
-        self._last_sweep = now
-        cutoff = now - self._horizon
-        for key in [k for k, hits in self._hits.items() if not hits or hits[-1] <= cutoff]:
-            del self._hits[key]
+        counts, conditions, retries = [], [], []
+        for i in range(len(self._limits)):
+            in_window = "hit_at > now() - make_interval(secs => :w%d)" % i
+            counts.append("count(*) FILTER (WHERE %s) AS n%d" % (in_window, i))
+            counts.append("min(hit_at) FILTER (WHERE %s) AS o%d" % (in_window, i))
+            conditions.append("n%d < :m%d" % (i, i))
+            # Seconds until the oldest hit in this window ages out of it.
+            retries.append(
+                "COALESCE(CASE WHEN n{i} >= :m{i} THEN EXTRACT(EPOCH FROM "
+                "(o{i} + make_interval(secs => :w{i}) - now())) END, 0)".format(i=i)
+            )
 
-    def hit(self, key: str) -> Optional[int]:
+        return """
+            WITH win AS (
+                SELECT {counts}
+                FROM rate_limit_hits
+                WHERE bucket_key = :key
+                  AND hit_at > now() - make_interval(secs => :horizon)
+            ),
+            decision AS (
+                SELECT *, ({conditions}) AS ok FROM win
+            ),
+            ins AS (
+                INSERT INTO rate_limit_hits (bucket_key, hit_at)
+                SELECT :key, now() FROM decision WHERE ok
+                RETURNING 1
+            )
+            SELECT ok, GREATEST({retries}) AS retry_after FROM decision
+        """.format(
+            counts=", ".join(counts),
+            conditions=" AND ".join(conditions),
+            retries=", ".join(retries),
+        )
+
+    def _cleanup(self, db: Session) -> None:
+        """
+        Drop hits older than the longest window.
+
+        Without this the table grows by one row per request forever. Forged
+        X-Forwarded-For values make the key space unbounded too, so this is
+        what stops a rate limiter from becoming a way to fill the disk.
+        """
+        now = time.monotonic()
+        with self._cleanup_lock:
+            if now - self._last_cleanup < self._cleanup_every:
+                return
+            self._last_cleanup = now
+        deleted = db.execute(
+            text(
+                "DELETE FROM rate_limit_hits "
+                "WHERE hit_at < now() - make_interval(secs => :horizon)"
+            ),
+            {"horizon": self._horizon},
+        ).rowcount
+        db.commit()
+        if deleted:
+            logger.info("Pruned %d expired rate-limit rows", deleted)
+
+    def hit(self, db: Session, key: str) -> Optional[int]:
         """
         Record a request against `key`.
 
@@ -108,53 +190,59 @@ class SlidingWindowRateLimiter:
         if not self._limits:
             return None
 
-        now = time.monotonic()
-        with self._lock:
-            self._sweep(now)
-            hits = self._hits.get(key)
-            if hits is None:
-                hits = self._hits[key] = deque()
+        params = {"key": key, "horizon": self._horizon}
+        for i, (max_requests, window) in enumerate(self._limits):
+            params["m%d" % i] = max_requests
+            params["w%d" % i] = window
 
-            # Everything older than the longest window is irrelevant to every
-            # window, so one prune per call keeps each deque bounded.
-            cutoff = now - self._horizon
-            while hits and hits[0] <= cutoff:
-                hits.popleft()
+        # Serialise callers sharing a key. Without this two replicas can read
+        # the same count concurrently and both admit the request; the lock is
+        # per key, so unrelated callers never wait on each other. It is held
+        # only until the commit below.
+        db.execute(text("SELECT pg_advisory_xact_lock(hashtext(:key))"), {"key": key})
 
-            for max_requests, window in self._limits:
-                window_start = now - window
-                # Timestamps ascend, so counting from the right stops as soon as
-                # it leaves the window instead of walking the whole deque.
-                count = 0
-                for stamp in reversed(hits):
-                    if stamp <= window_start:
-                        break
-                    count += 1
-                if count >= max_requests:
-                    oldest_in_window = hits[len(hits) - count]
-                    return max(1, int(oldest_in_window + window - now) + 1)
+        row = db.execute(self._sql, params).one()
+        db.commit()
 
-            hits.append(now)
+        self._cleanup(db)
+
+        if row.ok:
             return None
+        return max(1, int(row.retry_after) + 1)
 
 
 def build_dependency(
-    limiter: SlidingWindowRateLimiter,
+    limiter: PostgresRateLimiter,
     trusted_hops: int = 1,
     message: str = "Too many requests. Please wait a moment and try again.",
 ):
     """
     Wrap a limiter as a FastAPI dependency.
 
-    Raising from a dependency means a throttled request never reaches the
+    Resolving from a dependency means a throttled request never reaches the
     embedding or completion call, so rejections cost nothing.
     """
+    from app.db import get_db
+    from fastapi import Depends
 
-    def dependency(request: Request) -> None:
+    def dependency(request: Request, db: Session = Depends(get_db)) -> None:
         key = resolve_client_ip(request, trusted_hops)
-        retry_after = limiter.hit(key)
+        try:
+            retry_after = limiter.hit(db, key)
+        except SQLAlchemyError:
+            # Fail closed. The endpoint cannot answer without this same
+            # database anyway, and failing open would leave spend uncapped
+            # exactly when nobody is watching.
+            db.rollback()
+            logger.exception("Rate limiter could not reach Postgres")
+            raise HTTPException(
+                status_code=503,
+                detail="The assistant is temporarily unavailable. Please try again shortly.",
+            )
+
         if retry_after is None:
             return
+
         logger.warning("Rate limited %s, retry after %ss", key, retry_after)
         raise HTTPException(
             status_code=429,

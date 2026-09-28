@@ -153,21 +153,34 @@ embedding plus a completion, so `app/rate_limit.py` caps each caller at
 returns `429` with a `Retry-After` header and a plain-string `detail` that the
 widget shows to the customer as written.
 
-Three things worth knowing:
+Four things worth knowing:
 
+- **Counters live in Postgres, in `rate_limit_hits`.** An in-process limiter
+  was tried first and did not hold: this service runs more than one replica,
+  the load balancer round-robins between them, and each kept its own tally.
+  Measured against a 6/minute limit, 24 requests let 13 through, with allowed
+  and rejected calls interleaved by whichever replica answered. Shared state is
+  what makes the configured number the real number. The table is created at
+  startup, so a deploy needs no migration step.
 - **Callers are identified from `X-Forwarded-For`, reading right to left.**
   `request.client.host` is Railway's proxy and is the same for everyone, so
   limiting on it would throttle all users as one. Within the header, the
   rightmost entry is the one our nearest trusted proxy appended; entries to its
   left came from the caller and can be forged. Taking the leftmost value — the
-  usual mistake — would hand out a fresh allowance per forged header.
+  usual mistake — would hand out a fresh allowance per forged header. Confirmed
+  against the deployed service: forging the header earns no new allowance.
 - **The limiter runs before request validation**, so a malformed body still
   counts against the allowance and cannot be used to hammer the endpoint for
   free. It also runs before retrieval, so rejected calls cost nothing.
-- **Counters live in the process.** Railway runs one replica by default, so
-  that is the whole service. Scale to several and each keeps its own
-  allowance, multiplying the effective limit by the replica count — move the
-  state to Redis or a Postgres table at that point.
+- **It fails closed.** If the counter query cannot reach Postgres the endpoint
+  returns `503` rather than waving the request through. Retrieval needs the
+  same database, so failing open would not have kept the bot working — it
+  would only have uncapped spend at the worst moment.
+
+Counting costs one extra round trip to Postgres per request, on top of the one
+retrieval already makes. Within Railway that is a fraction of a millisecond
+against the second or more spent in OpenAI. Run the app from your laptop
+against the public proxy, though, and each hit costs about a second.
 
 ## Before exposing this publicly
 

@@ -14,6 +14,12 @@ from app.config import settings
 settings.validate()
 
 from app.chat_router import router as chat_router  # noqa: E402
+from app.db import engine  # noqa: E402
+from app.rate_limit import ensure_schema  # noqa: E402
+
+# The rate limiter keeps its counters in Postgres so they are shared across
+# replicas. Creating the table here means a deploy needs no migration step.
+ensure_schema(engine)
 
 # Paths
 CURRENT_FILE = Path(__file__).resolve()

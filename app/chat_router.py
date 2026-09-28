@@ -7,7 +7,7 @@ from sqlalchemy.orm import Session
 
 from app.config import settings
 from app.db import get_db
-from app.rate_limit import SlidingWindowRateLimiter, build_dependency
+from app.rate_limit import PostgresRateLimiter, build_dependency
 from app.schemas import ChatRequest
 from app.services.retrieval_service import retrieve_relevant_docs
 from app.services.llm_service import generate_llm_answer
@@ -26,9 +26,10 @@ if not logger.handlers:
 
 router = APIRouter()
 
-# Built once at import so the counters live for the process, not the request.
+# Built once at import; the counters themselves live in Postgres, shared by
+# every replica, so the configured limit is the limit the service enforces.
 _chat_rate_limit = build_dependency(
-    SlidingWindowRateLimiter(
+    PostgresRateLimiter(
         [
             (settings.RATE_LIMIT_PER_MINUTE, 60),
             (settings.RATE_LIMIT_PER_HOUR, 3600),
