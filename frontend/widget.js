@@ -264,6 +264,16 @@
           );
         }
         return res.json().then(function (data) {
+          // 429 is the one error the customer can act on, and the API words it
+          // for them - show it as sent instead of the generic failure line.
+          if (res.status === 429) {
+            var e = new Error("rate limited");
+            e.userMessage =
+              typeof data.detail === "string"
+                ? data.detail
+                : "You're sending messages too quickly. Please wait a moment.";
+            throw e;
+          }
           if (!res.ok) {
             throw new Error(
               "HTTP " + res.status + ": " +
@@ -286,13 +296,17 @@
       .catch(function (err) {
         typing(false);
         var aborted = err && (err.name === "AbortError" || /abort/i.test(err.message || ""));
-        bubble(
-          aborted
-            ? "That took longer than expected. Please try again, or email support@teep.africa."
-            : "Sorry, I can't reach the assistant right now. Please try again shortly, or email support@teep.africa.",
-          "err"
-        );
-        console.error("[TEEP widget]", err);
+        if (err && err.userMessage) {
+          bubble(err.userMessage, "err");
+        } else {
+          bubble(
+            aborted
+              ? "That took longer than expected. Please try again, or email support@teep.africa."
+              : "Sorry, I can't reach the assistant right now. Please try again shortly, or email support@teep.africa.",
+            "err"
+          );
+          console.error("[TEEP widget]", err);
+        }
       })
       .then(function () {
         clearTimeout(timer);

@@ -36,6 +36,18 @@ class Settings:
         if o.strip()
     ]
 
+    # Per-IP caps on POST /api/chat. The defaults leave room for a real support
+    # conversation - a question every ten seconds, dozens over an afternoon -
+    # while putting a ceiling on what one caller can spend in OpenAI credits.
+    # Set either to 0 to switch that window off.
+    RATE_LIMIT_PER_MINUTE = int(os.getenv("RATE_LIMIT_PER_MINUTE", "6"))
+    RATE_LIMIT_PER_HOUR = int(os.getenv("RATE_LIMIT_PER_HOUR", "40"))
+
+    # How many proxies sit in front of the app, used to pick the trustworthy
+    # entry out of X-Forwarded-For. 1 is correct for Railway's edge; raise it
+    # only if you put another proxy or CDN in front of that.
+    TRUSTED_PROXY_HOPS = int(os.getenv("TRUSTED_PROXY_HOPS", "1"))
+
     def validate(self) -> None:
         """
         Fail at startup rather than per request.

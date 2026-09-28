@@ -5,7 +5,9 @@ from typing import Optional
 from fastapi import APIRouter, Body, Depends, HTTPException, Query
 from sqlalchemy.orm import Session
 
+from app.config import settings
 from app.db import get_db
+from app.rate_limit import SlidingWindowRateLimiter, build_dependency
 from app.schemas import ChatRequest
 from app.services.retrieval_service import retrieve_relevant_docs
 from app.services.llm_service import generate_llm_answer
@@ -24,7 +26,23 @@ if not logger.handlers:
 
 router = APIRouter()
 
-@router.post("/chat")
+# Built once at import so the counters live for the process, not the request.
+_chat_rate_limit = build_dependency(
+    SlidingWindowRateLimiter(
+        [
+            (settings.RATE_LIMIT_PER_MINUTE, 60),
+            (settings.RATE_LIMIT_PER_HOUR, 3600),
+        ]
+    ),
+    trusted_hops=settings.TRUSTED_PROXY_HOPS,
+    message=(
+        "You're sending messages a little too quickly. "
+        "Please wait a moment and try again."
+    ),
+)
+
+
+@router.post("/chat", dependencies=[Depends(_chat_rate_limit)])
 def chat(
     payload: Optional[ChatRequest] = Body(
         None,

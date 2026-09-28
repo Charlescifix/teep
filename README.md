@@ -22,6 +22,9 @@ stored in Postgres with pgvector.
 | `DATABASE_URL` | yes | Postgres connection string. A `postgres://` URL is rewritten to `postgresql://` automatically, so Railway's value works as-is. |
 | `OPENAI_API_KEY` | yes | Used for both embeddings and chat completions. |
 | `ALLOWED_ORIGINS` | no | Comma-separated CORS origins. Defaults to the TEEP domains plus localhost. Only needed when the widget is embedded on another host. |
+| `RATE_LIMIT_PER_MINUTE` | no | Per-IP cap on `/api/chat`. Defaults to 6. `0` disables this window. |
+| `RATE_LIMIT_PER_HOUR` | no | Per-IP cap on `/api/chat`. Defaults to 40. `0` disables this window. |
+| `TRUSTED_PROXY_HOPS` | no | Proxies in front of the app, used to read `X-Forwarded-For`. Defaults to 1, which is correct for Railway. |
 | `PORT` | no | Set by Railway. Defaults to 8000 locally. |
 
 The app validates the two required variables at startup and exits with a message
@@ -142,7 +145,32 @@ marketing page's HTML. A relative `/api/chat` from that domain would therefore
 this twice - it always calls an absolute origin, and it rejects any reply whose
 `Content-Type` is not JSON rather than treating the page shell as an answer.
 
+## Rate limiting
+
+`POST /api/chat` is public through the widget and every allowed call spends an
+embedding plus a completion, so `app/rate_limit.py` caps each caller at
+6 requests a minute and 40 an hour by default. Over either limit the endpoint
+returns `429` with a `Retry-After` header and a plain-string `detail` that the
+widget shows to the customer as written.
+
+Three things worth knowing:
+
+- **Callers are identified from `X-Forwarded-For`, reading right to left.**
+  `request.client.host` is Railway's proxy and is the same for everyone, so
+  limiting on it would throttle all users as one. Within the header, the
+  rightmost entry is the one our nearest trusted proxy appended; entries to its
+  left came from the caller and can be forged. Taking the leftmost value — the
+  usual mistake — would hand out a fresh allowance per forged header.
+- **The limiter runs before request validation**, so a malformed body still
+  counts against the allowance and cannot be used to hammer the endpoint for
+  free. It also runs before retrieval, so rejected calls cost nothing.
+- **Counters live in the process.** Railway runs one replica by default, so
+  that is the whole service. Scale to several and each keeps its own
+  allowance, multiplying the effective limit by the replica count — move the
+  state to Redis or a Postgres table at that point.
+
 ## Before exposing this publicly
 
-`POST /api/chat` has no authentication or rate limiting, and every call spends
-OpenAI credits on one embedding plus one completion.
+`POST /api/chat` still has no authentication, and the per-IP limits above are
+the only ceiling on spend. A distributed caller with many source addresses is
+not covered; add a global cap if that becomes a concern.
