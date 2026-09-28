@@ -68,9 +68,17 @@ def chat(
     # 5) Log the final answer (you might want to limit length if it's very long)
     logger.info(f"Final answer: {final_answer[:200]}...")  # snippet if large
 
+    # The retrieved chunks stay server-side. They used to ship in the response,
+    # which meant anyone on teep.africa could read the knowledge base verbatim
+    # out of the network tab, and walk the whole corpus by varying the question.
+    # The titles and scores are in the log above when a reply needs explaining.
+    logger.info(
+        "Chunks used: %s",
+        [(d["title"], round(d["similarity_score"], 3)) for d in docs],
+    )
+
     return {
         "query": user_query,
-        "relevant_docs": docs,
         "answer": final_answer
     }
 

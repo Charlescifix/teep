@@ -1,0 +1,37 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>TEEP widget preview</title>
+  <style>
+    body {
+      margin: 0;
+      min-height: 100vh;
+      font-family: system-ui, -apple-system, "Segoe UI", Roboto, sans-serif;
+      background: #00325e;
+      color: #fff;
+      padding: 72px 24px;
+    }
+    .box { max-width: 640px; margin: 0 auto; }
+    h1 { font-size: 34px; margin: 0 0 12px; }
+    p { color: rgba(255, 255, 255, .78); line-height: 1.6; margin: 0 0 10px; }
+    code { background: rgba(255, 255, 255, .12); padding: 2px 6px; border-radius: 4px; font-size: 13px; }
+  </style>
+</head>
+<body>
+  <div class="box">
+    <h1>Widget preview</h1>
+    <p>
+      A stand-in for a marketing page, used to check the launcher, panel and
+      answers before embedding on teep.africa. The real site is a React SPA, so
+      this only approximates its background - what matters is that the widget
+      stays inside its shadow root and is not affected by the page around it.
+    </p>
+    <p>Open the bubble in the bottom-right corner and ask something.</p>
+  </div>
+
+  <!-- Served by this same FastAPI app, so the API origin resolves to itself. -->
+  <script src="/widget.js" defer></script>
+</body>
+</html>

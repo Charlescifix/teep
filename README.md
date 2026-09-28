@@ -71,10 +71,14 @@ curl -X POST 'http://127.0.0.1:8000/api/chat?user_query=How+long+do+refunds+take
 ```json
 {
   "query": "How long do refunds take?",
-  "relevant_docs": [{"id": 1, "title": "Refund Policy", "content": "...", "similarity_score": 0.83}],
   "answer": "Refunds are processed within 5 business days after approval. ..."
 }
 ```
+
+The retrieved chunks are deliberately not in the response — the endpoint is
+public through the widget, and returning them let anyone read the knowledge
+base out of the browser's network tab. Which chunks were used, and their
+scores, are logged server-side instead.
 
 Each call is independent — there is no conversation history, so follow-up
 questions do not see earlier turns.
@@ -101,16 +105,42 @@ start command and a `/health` check, `.python-version` pins Python 3.11, and the
 5. Check `https://<your-service>.up.railway.app/health`, then open `/` for the
    widget.
 
-### Embedding the widget elsewhere
+### Embedding the widget on teep.africa
 
-`frontend/index.html` calls a relative `/api/chat`, which works only while
-FastAPI serves the page. To put the widget on another host, set `API_ENDPOINT` to
-the absolute Railway URL and add that host to `ALLOWED_ORIGINS`.
+`frontend/widget.js` is the embeddable build: a floating launcher and chat panel
+that mount into any page from a single tag.
 
-Note that teep.africa is a static Netlify site with a catch-all: an unknown path
-there returns `200` with the marketing page's HTML. A relative `/api/chat` from
-that domain would therefore "succeed" with HTML, and the widget would show
-"Could not reach the chatbot server" while monitoring saw a `200`.
+```html
+<script src="https://teep-production.up.railway.app/widget.js" defer></script>
+```
+
+teep.africa is a React SPA on Netlify, so add it either in the site repo's
+`index.html` before `</body>`, or without touching the repo under
+**Site configuration → Build & deploy → Post processing → Snippet injection**,
+inserting before `</body>`.
+
+The widget reads the API origin from its own `src`, so the URL is written once.
+Everything renders in a shadow root, which keeps the site's Tailwind resets and
+the widget's styles from reaching each other.
+
+Optional attributes: `data-api-base` (when the API is not where the script is
+served from), `data-brand`, `data-accent`, `data-title`, `data-subtitle`,
+`data-greeting`, `data-timeout`. The page can also open the panel from its own
+CTA with `window.TeepChat.open()`.
+
+`https://teep.africa` and `https://www.teep.africa` are already in the default
+`ALLOWED_ORIGINS`. Netlify deploy previews (`*.netlify.app`) are not — add the
+preview URL to that variable if you want to test the widget there first.
+
+Preview it locally at `/embed-preview.html` while `uvicorn` is running.
+
+#### Why the widget never uses a relative path
+
+teep.africa has a SPA catch-all: an unknown path returns `200` with the
+marketing page's HTML. A relative `/api/chat` from that domain would therefore
+"succeed" with HTML while monitoring saw a `200`. The widget defends against
+this twice - it always calls an absolute origin, and it rejects any reply whose
+`Content-Type` is not JSON rather than treating the page shell as an answer.
 
 ## Before exposing this publicly
 
