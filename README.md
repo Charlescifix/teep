@@ -155,13 +155,12 @@ widget shows to the customer as written.
 
 Four things worth knowing:
 
-- **Counters live in Postgres, in `rate_limit_hits`.** An in-process limiter
-  was tried first and did not hold: this service runs more than one replica,
-  the load balancer round-robins between them, and each kept its own tally.
-  Measured against a 6/minute limit, 24 requests let 13 through, with allowed
-  and rejected calls interleaved by whichever replica answered. Shared state is
-  what makes the configured number the real number. The table is created at
-  startup, so a deploy needs no migration step.
+- **Counters live in Postgres, in `rate_limit_hits`.** They are shared by every
+  process, so the configured number is the enforced number whatever the replica
+  count, and they survive a restart. The table is created at startup, so a
+  deploy needs no migration step. Verified against the deployed service: across
+  40 requests no address exceeded 6 in any rolling 60-second window, with four
+  addresses landing on exactly 6.
 - **Callers are identified from `X-Forwarded-For`, reading right to left.**
   `request.client.host` is Railway's proxy and is the same for everyone, so
   limiting on it would throttle all users as one. Within the header, the
@@ -181,6 +180,25 @@ Counting costs one extra round trip to Postgres per request, on top of the one
 retrieval already makes. Within Railway that is a fraction of a millisecond
 against the second or more spent in OpenAI. Run the app from your laptop
 against the public proxy, though, and each hit costs about a second.
+
+### A limit per address is not a limit per person
+
+Two cases this cannot tell apart, both worth knowing before tuning the numbers:
+
+- **Several people behind one address.** Carrier-grade NAT puts many mobile
+  subscribers on one public IP, which is common on the networks TEEP serves.
+  They share a single allowance, so a busy few can throttle everyone else on
+  that carrier. This argues for keeping the per-minute limit generous.
+- **One person across several addresses.** A client whose provider rotates its
+  NAT pool gets a fresh allowance per address. This is not hypothetical: the
+  machine these limits were tested from rotated across five addresses in
+  `152.233.29.0/24` during a single run, spreading 24 requests over five
+  buckets. An attacker with a pool of addresses is limited per address, not
+  overall.
+
+Neither is fixable by IP alone. A signed token issued by the page, or a global
+ceiling alongside the per-IP one, is what closes the second; the first needs
+some notion of a session. Both are worth doing only if abuse actually shows up.
 
 ## Before exposing this publicly
 

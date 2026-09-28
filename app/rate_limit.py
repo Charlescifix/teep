@@ -6,12 +6,10 @@ The widget on teep.africa makes POST /api/chat reachable by anyone, and every
 allowed call spends an embedding plus a completion. This caps what a single
 caller can spend without needing an account system.
 
-Counters live in Postgres, not in the process. An in-process limiter was tried
-first and measurably did not hold: Railway runs more than one replica, the load
-balancer round-robins between them, and each kept its own tally - 24 requests
-against a 6/minute limit let 13 through, with allowed and rejected calls
-interleaved by which replica happened to answer. Shared state is what makes the
-configured number the real number.
+Counters live in Postgres, not in the process, so every replica shares one
+tally and a restart does not hand everyone a fresh allowance. An in-process
+version came first; it made the enforced limit depend on how many processes
+happened to be running, which is not something this module should care about.
 
 Sliding window rather than fixed buckets: a fixed window lets someone send a
 full allowance at 11:59:59 and another at 12:00:00, so the real burst is twice
