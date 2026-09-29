@@ -2,12 +2,13 @@
 import logging
 from typing import Optional
 
-from fastapi import APIRouter, Body, Depends, HTTPException, Query
+from fastapi import APIRouter, Body, Depends, HTTPException, Query, Request
 from sqlalchemy.orm import Session
 
 from app.config import settings
 from app.db import get_db
-from app.rate_limit import PostgresRateLimiter, build_dependency
+from app.rate_limit import PostgresRateLimiter, build_dependency, resolve_client_ip
+from app.request_log import describe_request
 from app.schemas import ChatRequest
 from app.services.retrieval_service import retrieve_relevant_docs
 from app.services.llm_service import generate_llm_answer
@@ -40,11 +41,14 @@ _chat_rate_limit = build_dependency(
         "You're sending messages a little too quickly. "
         "Please wait a moment and try again."
     ),
+    ipv4_prefix=settings.RATE_LIMIT_IPV4_PREFIX,
+    ipv6_prefix=settings.RATE_LIMIT_IPV6_PREFIX,
 )
 
 
 @router.post("/chat", dependencies=[Depends(_chat_rate_limit)])
 def chat(
+    request: Request,
     payload: Optional[ChatRequest] = Body(
         None,
         description='JSON body, e.g. {"user_query": "How long do refunds take?"}',
@@ -68,6 +72,15 @@ def chat(
     """
     user_query = payload.user_query if payload else user_query
     if not user_query or not user_query.strip():
+        # The sibling of the handler in app/main.py: a request that satisfies
+        # the schema but carries nothing to answer is rejected here instead,
+        # and would otherwise be just as invisible in the logs.
+        logger.warning(
+            "422 empty query from %s: %s parsed=%r",
+            resolve_client_ip(request, settings.TRUSTED_PROXY_HOPS),
+            describe_request(request),
+            payload.user_query if payload else None,
+        )
         raise HTTPException(
             status_code=422,
             detail="user_query is required, as a JSON body field or a query parameter.",

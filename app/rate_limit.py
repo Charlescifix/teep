@@ -16,6 +16,7 @@ full allowance at 11:59:59 and another at 12:00:00, so the real burst is twice
 the limit.
 """
 
+import ipaddress
 import logging
 import threading
 import time
@@ -80,6 +81,34 @@ def resolve_client_ip(request: Request, trusted_hops: int = 1) -> str:
 
     client = request.client
     return client.host if client else "unknown"
+
+
+def bucket_key_for(ip: str, ipv4_prefix: int = 24, ipv6_prefix: int = 64) -> str:
+    """
+    Collapse an address to the network that should share one allowance.
+
+    Counting the exact address hands a fresh allowance to every IP one actor
+    can reach, which is not hypothetical here: a flood arrived from
+    152.233.29.1 through .5 - a single /24 - and so got five times the
+    configured per-minute cap. Treating the /24 as one caller closes that.
+
+    The trade-off runs the other way for real users: mobile carriers put many
+    subscribers behind one range, so a wider prefix throttles more strangers
+    as a group. That is why the widths are settings and not constants - set
+    them to 32 and 128 to go back to per-address counting without a deploy.
+
+    An address that will not parse (a forged header, or "unknown") is returned
+    unchanged so it still gets a bucket; _cleanup is what bounds that keyspace.
+    """
+    try:
+        addr = ipaddress.ip_address(ip)
+    except ValueError:
+        return ip
+
+    prefix = ipv4_prefix if addr.version == 4 else ipv6_prefix
+    # strict=False so host bits in the address are masked off rather than
+    # raising - the whole point here is to discard them.
+    return str(ipaddress.ip_network(f"{addr}/{prefix}", strict=False))
 
 
 class PostgresRateLimiter:
@@ -213,6 +242,8 @@ def build_dependency(
     limiter: PostgresRateLimiter,
     trusted_hops: int = 1,
     message: str = "Too many requests. Please wait a moment and try again.",
+    ipv4_prefix: int = 24,
+    ipv6_prefix: int = 64,
 ):
     """
     Wrap a limiter as a FastAPI dependency.
@@ -224,7 +255,8 @@ def build_dependency(
     from fastapi import Depends
 
     def dependency(request: Request, db: Session = Depends(get_db)) -> None:
-        key = resolve_client_ip(request, trusted_hops)
+        ip = resolve_client_ip(request, trusted_hops)
+        key = bucket_key_for(ip, ipv4_prefix, ipv6_prefix)
         try:
             retry_after = limiter.hit(db, key)
         except SQLAlchemyError:
@@ -241,7 +273,9 @@ def build_dependency(
         if retry_after is None:
             return
 
-        logger.warning("Rate limited %s, retry after %ss", key, retry_after)
+        logger.warning(
+            "Rate limited %s (address %s), retry after %ss", key, ip, retry_after
+        )
         raise HTTPException(
             status_code=429,
             # A plain string, not a list: the widget shows detail verbatim.
