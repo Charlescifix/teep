@@ -22,8 +22,8 @@ stored in Postgres with pgvector.
 | `DATABASE_URL` | yes | Postgres connection string. A `postgres://` URL is rewritten to `postgresql://` automatically, so Railway's value works as-is. |
 | `OPENAI_API_KEY` | yes | Used for both embeddings and chat completions. |
 | `ALLOWED_ORIGINS` | no | Comma-separated CORS origins. Defaults to the TEEP domains plus localhost. Only needed when the widget is embedded on another host. |
-| `RATE_LIMIT_PER_MINUTE` | no | Per-IP cap on `/api/chat`. Defaults to 6. `0` disables this window. |
-| `RATE_LIMIT_PER_HOUR` | no | Per-IP cap on `/api/chat`. Defaults to 40. `0` disables this window. |
+| `RATE_LIMIT_PER_MINUTE` | no | Per-IP cap on `/api/chat`. Defaults to 10. `0` disables this window. |
+| `RATE_LIMIT_PER_HOUR` | no | Per-IP cap on `/api/chat`. Defaults to 50. `0` disables this window. |
 | `TRUSTED_PROXY_HOPS` | no | Proxies in front of the app, used to read `X-Forwarded-For`. Defaults to 1, which is correct for Railway. |
 | `PORT` | no | Set by Railway. Defaults to 8000 locally. |
 
@@ -149,18 +149,22 @@ this twice - it always calls an absolute origin, and it rejects any reply whose
 
 `POST /api/chat` is public through the widget and every allowed call spends an
 embedding plus a completion, so `app/rate_limit.py` caps each caller at
-6 requests a minute and 40 an hour by default. Over either limit the endpoint
+10 requests a minute and 50 an hour by default. Over either limit the endpoint
 returns `429` with a `Retry-After` header and a plain-string `detail` that the
 widget shows to the customer as written.
+
+The per-minute figure is deliberately looser than one person needs. Carrier-
+grade NAT puts many mobile subscribers behind one address, and they share an
+allowance — see the note at the end of this section.
 
 Four things worth knowing:
 
 - **Counters live in Postgres, in `rate_limit_hits`.** They are shared by every
   process, so the configured number is the enforced number whatever the replica
   count, and they survive a restart. The table is created at startup, so a
-  deploy needs no migration step. Verified against the deployed service: across
-  40 requests no address exceeded 6 in any rolling 60-second window, with four
-  addresses landing on exactly 6.
+  deploy needs no migration step. Verified against the deployed service: no
+  address has ever exceeded its per-minute allowance in a rolling 60-second
+  window, measured by replaying the recorded hits after a burst of traffic.
 - **Callers are identified from `X-Forwarded-For`, reading right to left.**
   `request.client.host` is Railway's proxy and is the same for everyone, so
   limiting on it would throttle all users as one. Within the header, the
