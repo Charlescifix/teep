@@ -1,8 +1,13 @@
 # app/main.py
 
+import logging
 from pathlib import Path
-from fastapi import FastAPI
+
+from fastapi import FastAPI, Request
+from fastapi.encoders import jsonable_encoder
+from fastapi.exceptions import RequestValidationError
 from fastapi.middleware.cors import CORSMiddleware
+from fastapi.responses import JSONResponse
 from fastapi.staticfiles import StaticFiles
 
 from app.config import settings
@@ -15,7 +20,10 @@ settings.validate()
 
 from app.chat_router import router as chat_router  # noqa: E402
 from app.db import engine  # noqa: E402
-from app.rate_limit import ensure_schema  # noqa: E402
+from app.rate_limit import ensure_schema, resolve_client_ip  # noqa: E402
+from app.request_log import ERRORS_SNIPPET, clip, describe_request  # noqa: E402
+
+logger = logging.getLogger(__name__)
 
 # The rate limiter keeps its counters in Postgres so they are shared across
 # replicas. Creating the table here means a deploy needs no migration step.
@@ -48,6 +56,35 @@ app.add_middleware(
     allow_methods=["GET", "POST", "OPTIONS"],
     allow_headers=["*"],
 )
+
+# Log the requests FastAPI rejects before they reach a route.
+#
+# These were invisible: a validation failure produced an access-log line and
+# nothing else, so a sustained flood of them said only that someone was sending
+# something wrong - not what, and not whether it was an attacker or one of our
+# own integrations regressing. The response is unchanged, matching FastAPI's
+# default handler exactly, because widget.js reads `detail` off it.
+@app.exception_handler(RequestValidationError)
+async def log_request_validation_error(request: Request, exc: RequestValidationError):
+    body = b""
+    try:
+        # Already read and cached during validation, so this does not block on
+        # a client that has stopped sending.
+        body = await request.body()
+    except Exception:  # pragma: no cover - body is best-effort context only
+        pass
+
+    logger.warning(
+        "422 rejected from %s: %s errors=%s",
+        resolve_client_ip(request, settings.TRUSTED_PROXY_HOPS),
+        describe_request(request, body),
+        clip(str(exc.errors()), ERRORS_SNIPPET),
+    )
+    return JSONResponse(
+        status_code=422,
+        content={"detail": jsonable_encoder(exc.errors())},
+    )
+
 
 # Health check
 @app.get("/health")

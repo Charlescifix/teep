@@ -50,6 +50,16 @@ class Settings:
     # only if you put another proxy or CDN in front of that.
     TRUSTED_PROXY_HOPS = int(os.getenv("TRUSTED_PROXY_HOPS", "1"))
 
+    # How much of the caller's address the limiter counts on. The default /24
+    # means 152.233.29.1 and 152.233.29.5 share one allowance instead of taking
+    # one each, which is how a flood from a single range walked past the cap.
+    #
+    # Widening the bucket also groups more real strangers together - see the
+    # note on RATE_LIMIT_PER_MINUTE above - so 32 and 128 restore per-address
+    # counting if these limits start catching genuine users.
+    RATE_LIMIT_IPV4_PREFIX = int(os.getenv("RATE_LIMIT_IPV4_PREFIX", "24"))
+    RATE_LIMIT_IPV6_PREFIX = int(os.getenv("RATE_LIMIT_IPV6_PREFIX", "64"))
+
     def validate(self) -> None:
         """
         Fail at startup rather than per request.
@@ -69,6 +79,18 @@ class Settings:
                 + ", ".join(missing)
                 + ". Set them in the Railway service variables (or .env locally)."
             )
+
+        # A prefix outside its family's range would make every call raise from
+        # inside the limiter, i.e. a 503 per request, so catch it at boot.
+        for name, ceiling in (
+            ("RATE_LIMIT_IPV4_PREFIX", 32),
+            ("RATE_LIMIT_IPV6_PREFIX", 128),
+        ):
+            value = getattr(self, name)
+            if not 0 <= value <= ceiling:
+                raise RuntimeError(
+                    f"{name} must be between 0 and {ceiling}, got {value}."
+                )
 
 
 settings = Settings()
